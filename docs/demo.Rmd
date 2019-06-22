@@ -1,0 +1,171 @@
+---
+title: "Demonstration of Discrete Choice Methods with R"
+author: "Liming Wang"
+date: "6/22/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+opts_chunk$set(echo=TRUE, message=FALSE, warning=F)
+pander::panderOptions('round', 2)
+pander::panderOptions('keep.trailing.zeros', TRUE)
+```
+
+```{r install-load-packages}
+if (!require("pacman")) {install.packages("pacman"); library(pacman)}
+p_load(tidyverse, mlogit, stargazer, Rchoice, furniture)
+```
+
+## Binary Choice Model
+
+Use the German Health Care Usage Data from the `Rchoice` package. More information of the dataset available at https://rdrr.io/cran/Rchoice/man/Health.html
+
+```{r load data, results='asis'}
+#install.packages(Rchoice)
+library(Rchoice)
+data(Health)
+
+# DOCTOR  	=  1(Number of doctor visits > 0)                   
+# HOSPITAL	=  1(Number of hospital visits > 0)
+# HSAT      = health satisfaction, coded 0 (low) - 10 (high)  
+# DOCVIS    = number of doctor visits in last three months                   
+# HOSPVIS  	= number of hospital visits in last calendar year                   
+# PUBLIC    = insured in public health insurance = 1; otherwise = 0                   
+# ADDON 	  = insured by add-on insurance = 1; otherswise = 0
+# HHNINC 	  = household nominal monthly net income in German marks / 10000. (4 observations with income=0 were dropped)  
+# HHKIDS 	  =  children under age 16 in the household = 1; otherwise = 0                   
+# EDUC 	    = years of schooling 
+# AGE 	    =  age in years
+# FEMALE 	  =  1 for female headed household, 0 for male
+
+Health94 <- Health %>% 
+  filter(year==1994, # only use 1994 data 
+         hhinc!=0,   # exclude observations with hhinc == 0
+         !between(hsat, 6.51, 6.91)) %>% # exclude 6 observation with odd hsat values
+  mutate(id=row_number(),
+         doctor=ifelse(docvis>0, 1, 0), 
+         hospital=ifelse(hospvis>0, 1, 0),
+         hsat=as.factor(hsat)
+         ) %>% 
+  select(id, doctor, hospital, docvis, hospvis, hsat, 
+         public, addon, hhinc, hhkids, educ, age, female, married)
+
+Health94 %>% head() %>% kable()
+```
+
+
+## Descriptive Statistics
+
+```{r descriptives, results='asis'}
+#install.packages("furniture")
+library(furniture)
+Health94 %>% 
+  mutate_at(c("doctor", "hospital", "hsat", "public", "addon", "female", "married"), as.factor) %>% 
+  select(-id) %>% 
+  table1(#type = c("condensed"),
+         output = "html")
+```
+
+## OLS
+What if we fit an OLS model?
+
+```{r ols, results='asis'}
+m.ols <- lm(doctor ~ age + hhinc + female, data=Health94)
+stargazer(m.ols, title = "OLS Estimation Reusults", type = "html")
+```
+
+## MNL
+```{r mnl, results='asis'}
+m.data <- mlogit.data(Health94, shape = "wide", choice = "doctor",
+            id.var = "id", alt.levels = c(0, 1))
+
+
+#m0 <- mlogit(doctor ~ 1, m.data)
+m.mnl <- mlogit(doctor ~ 1 | age + hhinc + female, m.data)
+#m.pbt <- mlogit(doctor ~ 1 | age + hhinc + female, data=m.data, probit=TRUE)
+
+stargazer(m.mnl, title = "Simple MNL Estimation Results", type = "html")
+```
+
+```{r mnl-full, results='asis'}
+m.mnl0 <- mlogit(doctor ~ 1 | age + hhinc + female + hhkids + married + educ, m.data)
+m.mnl1 <- update(m.mnl0, . ~ . | . + female * married)
+m.mnl2 <- update(m.mnl0, . ~ . | . + female * age)
+m.mnl3 <- update(m.mnl0, . ~ . | . + hhinc * age)
+m.mnl4 <- update(m.mnl0, . ~ . | . + female * married + female * age + hhinc * age)
+
+stargazer(m.mnl0, m.mnl1, m.mnl2, m.mnl3, m.mnl4, 
+          column.labels=c("Model 0", "Model 1", "Model 2", "Model 3", "Model 4"),
+          title = "Full MNL Estimation Results", type = "html")
+```
+
+# Multinomial Choice Model
+Use the Swiss Metro dataset, information of the dataset is available at http://transp-or.epfl.ch/documents/technicalReports/CS_SwissmetroDescription.pdf
+
+The raw Swiss Metro data
+```{r load-swissmetro}
+url <- 'http://transp-or.epfl.ch/data/swissmetro.dat'
+swissmetro <- read_delim(url, delim="\t")
+names(swissmetro) = c("group","survey","sp","id","purpose","first","ticket","who",
+                               "luggage","age","male", "income","ga","origin","dest",
+                      "av_train","av_car","av_sm","tt_train","co_train","fr_train",
+                                "tt_sm","co_sm","fr_sm","seats_sm","tt_car","co_car",
+                      "choice")
+
+swissmetro %>% head() %>% kable()
+```
+
+Prepare data for mlogit
+```{r prep-data}
+swissmetro <- swissmetro %>% 
+  filter(choice!=0) %>%  #exclude "not known"
+  # mlogit requires alternative-specific variables to have values for all alternatives
+  # even when they don't make sense, here we assign 0 to these two alt-specific variable for car/train
+  mutate(fr_car=0,
+         seats_car=0,
+         seats_train=0,
+         choice=factor(choice, levels = 1:3, labels = c("train", "sm", "car") ),
+         # Convert categorical variables to factor, create additional variables
+         age=as.factor(age),
+         income=as.factor(income),
+         commuter=ifelse(purpose %in% c(1, 5), 1, 0),
+         business=ifelse(purpose %in% c(3, 7), 1, 0)) 
+
+# mlogit.data is very specific about the order of the columns - they have to appear in the same order for all generic varaibles, even if they are not adjacent.
+swissmetro.mldf = mlogit.data(swissmetro, shape="wide", choice="choice", 
+                              varying=sort(c("av_train","av_car","av_sm","tt_train","co_train","fr_train",
+                                             "tt_sm","co_sm","fr_sm","seats_sm","tt_car","co_car", 'fr_car', 
+                                             'seats_car', 'seats_train')), 
+                              sep="_")
+
+swissmetro.mldf  %>% head() %>% kable()
+```
+
+## MNL model
+```{r mnl1, results="asis"}
+#' To exclude alternatives not available (av==0)
+swissmetro.avmldf <- swissmetro.mldf[swissmetro.mldf$av==1, ]
+
+#' Compare estimation results with and without availability filter
+m1  <-  mlogit(choice~tt+co+fr|ga+business+commuter, swissmetro.mldf)
+m1.av  <-  mlogit(choice~tt+co+fr|ga+business+commuter, swissmetro.avmldf)
+stargazer(m1, m1.av, type="html", no.space=T)
+
+#' Full model specifications
+m2.1 <- mlogit(choice~fr|ga+male+business+commuter+first|co+tt, swissmetro.avmldf)
+m2.2 <- mlogit(choice~fr+co|ga+male+business+commuter+first|tt, swissmetro.avmldf)
+m2.3 <- mlogit(choice~fr+tt|ga+male+business+commuter+first|co, swissmetro.avmldf)
+#summary(m2.x <- mlogit(choice~co+tt|income, swissmetro.avmldf))
+#summary(m2.x <- mlogit(choice~fr|0|co+tt, swissmetro.avmldf))
+stargazer(m2.1, m2.2, m2.3, type="html", no.space=T)
+```
+
+## Value of Time
+```{r VOT}
+#' VOT and VOF
+#' Recall the forumla for VOT = B_tt/B_co, thus
+paste("VOT.car =", 60* coef(m2.1)[['car:tt']]/coef(m2.1)[['car:co']], "CHF/hour")
+paste("VOT.train", 60*coef(m2.1)[['train:tt']]/coef(m2.1)[['train:co']], "CHF/hour")
+paste("VOT.sm", 60*coef(m2.1)[['sm:tt']]/coef(m2.1)[['sm:co']], "CHF/hour")
+```
